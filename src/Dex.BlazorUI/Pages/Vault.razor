@@ -1,0 +1,136 @@
+@page "/vault"
+@using Dex.BlazorUI.Services
+@inject TradingPortfolioService Portfolio
+@inject MetamaskInteropService Wallet
+@implements IDisposable
+
+<div class="vault-page">
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:4px">Vault Overview</h1>
+    <p class="c-m" style="margin-bottom:18px">Secure balance for trading. Paper mode until on-chain vault is linked.</p>
+
+    <div class="vault-grid">
+        <div class="vault-card">
+            <h2>Total Balance</h2>
+            <div class="vault-balance">$ @Portfolio.UsdtBalance.ToString("N2")</div>
+            <div class="c-m">≈ @Portfolio.UsdtBalance.ToString("N2") USDT · Non-custodial ready</div>
+            <div class="vault-actions">
+                <div class="field">
+                    <label>Deposit amount (USDT)</label>
+                    <div class="field-row">
+                        <input type="number" @bind="_depositAmt" step="100" />
+                        <span class="unit">USDT</span>
+                    </div>
+                </div>
+                <button class="btn-primary" @onclick="Deposit">Deposit to Vault</button>
+                <div class="field">
+                    <label>Withdraw amount (USDT)</label>
+                    <div class="field-row">
+                        <input type="number" @bind="_withdrawAmt" step="100" />
+                        <span class="unit">USDT</span>
+                    </div>
+                </div>
+                <button class="btn-secondary" @onclick="Withdraw">Initiate Withdrawal</button>
+            </div>
+            @if (!string.IsNullOrEmpty(_msg))
+            {
+                <div style="margin-top:12px;font-size:12px" class="c-g">@_msg</div>
+            }
+        </div>
+
+        <div class="vault-card">
+            <h2>Wallet</h2>
+            @if (Wallet.IsConnected)
+            {
+                <div class="mono" style="font-size:14px;margin:12px 0">@Wallet.Account</div>
+                <div class="c-m" style="margin-bottom:12px">MetaMask connected</div>
+                <button class="btn-secondary" @onclick="Disconnect">Disconnect</button>
+            }
+            else
+            {
+                <div class="c-m" style="margin:16px 0">Connect MetaMask to link on-chain deposits.</div>
+                <button class="btn-primary" @onclick="Connect">Connect MetaMask</button>
+            }
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+                <div class="alloc-row"><span class="name">Network</span><span>Ethereum / EVM</span></div>
+                <div class="alloc-row"><span class="name">Mode</span><span class="c-g">Paper + Live prices</span></div>
+                <div class="alloc-row"><span class="name">Signatures</span><span>EIP-712 ready</span></div>
+            </div>
+        </div>
+
+        <div class="vault-card">
+            <h2>Transaction History</h2>
+            @if (_txs.Count == 0)
+            {
+                <div class="empty">No vault transactions yet</div>
+            }
+            else
+            {
+                @foreach (var t in _txs)
+                {
+                    <div class="tx-item">
+                        <div>
+                            <div class="kind">@t.Kind</div>
+                            <div class="c-m" style="font-size:10px">@t.Time</div>
+                        </div>
+                        <div style="text-align:right">
+                            <div class="mono @(t.Amount >= 0 ? "c-g" : "c-r")">@(t.Amount >= 0 ? "+" : "")@t.Amount.ToString("N2")</div>
+                            <div class="badge-ok">@t.Status</div>
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private decimal _depositAmt = 1000, _withdrawAmt = 500;
+    private string _msg = "";
+    private readonly List<Tx> _txs = new();
+
+    protected override void OnInitialized()
+    {
+        Portfolio.Changed += Refresh;
+        Wallet.StateChanged += Refresh;
+    }
+
+    private void Deposit()
+    {
+        if (_depositAmt <= 0) return;
+        Portfolio.Deposit(_depositAmt);
+        _txs.Insert(0, new Tx("Deposit USDT", _depositAmt, "Confirmed", DateTime.Now.ToString("g")));
+        _msg = $"Deposited ${_depositAmt:N2} USDT";
+    }
+
+    private void Withdraw()
+    {
+        if (!Portfolio.Withdraw(_withdrawAmt))
+        {
+            _msg = "Invalid amount or insufficient balance";
+            return;
+        }
+        _txs.Insert(0, new Tx("Withdraw USDT", -_withdrawAmt, "Timelocked", DateTime.Now.ToString("g")));
+        _msg = $"Withdrawal ${_withdrawAmt:N2} initiated";
+    }
+
+    private async Task Connect()
+    {
+        try
+        {
+            if (await Wallet.IsMetaMaskAvailableAsync()) await Wallet.ConnectAsync();
+            else _msg = "MetaMask not found";
+        }
+        catch (Exception ex) { _msg = ex.Message; }
+    }
+
+    private async Task Disconnect() => await Wallet.DisconnectAsync();
+
+    private void Refresh() => InvokeAsync(StateHasChanged);
+    public void Dispose()
+    {
+        Portfolio.Changed -= Refresh;
+        Wallet.StateChanged -= Refresh;
+    }
+
+    private record Tx(string Kind, decimal Amount, string Status, string Time);
+}

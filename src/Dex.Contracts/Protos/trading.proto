@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+option csharp_namespace = "Dex.Contracts.Trading";
+
+package dex.trading;
+
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  BUY = 1;
+  SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  LIMIT = 1;
+  MARKET = 2;
+  STOP_LIMIT = 3;
+  STOP_MARKET = 4;
+}
+
+enum TimeInForce {
+  TIF_UNSPECIFIED = 0;
+  GTC = 1;
+  IOC = 2;
+  FOK = 3;
+  GTD = 4;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  PENDING_NEW = 1;
+  NEW = 2;
+  PARTIALLY_FILLED = 3;
+  FILLED = 4;
+  PENDING_CANCEL = 5;
+  CANCELLED = 6;
+  REJECTED = 7;
+  EXPIRED = 8;
+}
+
+message PlaceOrderRequest {
+  int64 client_order_id = 1;
+  int32 market_id = 2;
+  OrderSide side = 3;
+  OrderType type = 4;
+  TimeInForce time_in_force = 5;
+  string price = 6;          // decimal string
+  string quantity = 7;
+  bool reduce_only = 8;
+  bool post_only = 9;
+  string leverage = 10;      // optional override
+}
+
+message PlaceOrderResponse {
+  int64 order_id = 1;
+  int64 client_order_id = 2;
+  OrderStatus status = 3;
+  string message = 4;
+  string remaining_quantity = 5;
+}
+
+message CancelOrderRequest {
+  int64 order_id = 1;
+  int64 client_order_id = 2;
+  int32 market_id = 3;
+}
+
+message CancelOrderResponse {
+  int64 order_id = 1;
+  OrderStatus status = 2;
+  bool success = 3;
+  string message = 4;
+}
+
+message BatchCancelRequest {
+  repeated CancelOrderRequest orders = 1;
+}
+
+message BatchCancelResponse {
+  repeated CancelOrderResponse results = 1;
+}
+
+message ExecutionReport {
+  int64 order_id = 1;
+  int64 client_order_id = 2;
+  int32 market_id = 3;
+  OrderSide side = 4;
+  OrderStatus status = 5;
+  string last_fill_price = 6;
+  string last_fill_quantity = 7;
+  string cumulative_filled = 8;
+  string remaining_quantity = 9;
+  int64 trade_id = 10;
+  int64 timestamp_utc_ticks = 11;
+  string reject_reason = 12;
+}
+
+message OrderStatusRequest {
+  int64 order_id = 1;
+  int64 client_order_id = 2;
+}
+
+message SessionHello {
+  string api_key = 1;
+  string timestamp = 2;
+  string signature = 3;   // HMAC or EIP-712
+}
+
+message SessionAck {
+  bool authenticated = 1;
+  string session_id = 2;
+  string message = 3;
+}
+
+message TradingClientMessage {
+  oneof payload {
+    SessionHello hello = 1;
+    PlaceOrderRequest place_order = 2;
+    CancelOrderRequest cancel_order = 3;
+    BatchCancelRequest batch_cancel = 4;
+    OrderStatusRequest status_request = 5;
+  }
+}
+
+message TradingServerMessage {
+  oneof payload {
+    SessionAck ack = 1;
+    PlaceOrderResponse place_response = 2;
+    CancelOrderResponse cancel_response = 3;
+    BatchCancelResponse batch_cancel_response = 4;
+    ExecutionReport execution_report = 5;
+  }
+}
+
+service TradingService {
+  // Bi-directional streaming trading session
+  rpc TradingSession (stream TradingClientMessage) returns (stream TradingServerMessage);
+
+  // Unary fallbacks
+  rpc PlaceOrder (PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc CancelOrder (CancelOrderRequest) returns (CancelOrderResponse);
+  rpc BatchCancel (BatchCancelRequest) returns (BatchCancelResponse);
+}

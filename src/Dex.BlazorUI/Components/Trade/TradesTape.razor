@@ -1,0 +1,37 @@
+@using Dex.BlazorUI.Models
+
+<div style="display:flex;flex-direction:column;height:100%;overflow:hidden">
+    <div class="panel-label" style="padding:6px 10px">Recent Trades</div>
+    <div class="ob-head"><span>Price</span><span class="r">Size</span><span class="r">Time</span></div>
+    <div style="flex:1;overflow-y:auto">
+        @foreach (var t in Trades.Take(40))
+        {
+            var buy = !t.IsBuyerMaker;
+            <div class="ob-row">
+                <span class="@(buy ? "c-g" : "c-r")">@t.Price.ToString("N2")</span>
+                <span class="r">@t.Quantity.ToString("0.####")</span>
+                <span class="r c-m">@FmtTime(t.TimestampUtcTicks)</span>
+            </div>
+        }
+        @if (Trades.Count == 0)
+        {
+            <div class="empty" style="padding:16px">Waiting for trades…</div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public List<TradeTick> Trades { get; set; } = new();
+
+    private static string FmtTime(long ticks)
+    {
+        try
+        {
+            var dt = ticks > 10_000_000_000_000
+                ? new DateTime(ticks, DateTimeKind.Utc)
+                : DateTimeOffset.FromUnixTimeMilliseconds(ticks / 10_000).UtcDateTime;
+            return dt.ToString("HH:mm:ss");
+        }
+        catch { return "--:--:--"; }
+    }
+}

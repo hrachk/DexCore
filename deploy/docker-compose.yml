@@ -1,0 +1,40 @@
+# Local development stack for DexCore
+# Usage: docker compose -f deploy/docker-compose.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dex
+      POSTGRES_PASSWORD: dex
+      POSTGRES_DB: dexcore
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: Foundry Anvil local EVM node
+  # Uncomment if foundry is available on host or use a foundry image
+  # anvil:
+  #   image: ghcr.io/foundry-rs/foundry:latest
+  #   entrypoint: ["anvil", "--host", "0.0.0.0", "--port", "8545"]
+  #   ports:
+  #     - "8545:8545"
+
+volumes:
+  pgdata:

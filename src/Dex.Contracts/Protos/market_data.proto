@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+option csharp_namespace = "Dex.Contracts.MarketData";
+
+package dex.marketdata;
+
+// ───────────────────────── L2 Order Book ─────────────────────────
+
+message PriceLevel {
+  string price = 1;      // decimal as string for precision
+  string quantity = 2;
+}
+
+message OrderBookSnapshot {
+  int32 market_id = 1;
+  string symbol = 2;
+  int64 sequence = 3;
+  int64 timestamp_utc_ticks = 4;
+  repeated PriceLevel bids = 5;  // best first
+  repeated PriceLevel asks = 6;
+}
+
+message OrderBookDelta {
+  int32 market_id = 1;
+  int64 sequence = 2;
+  int64 timestamp_utc_ticks = 3;
+  repeated PriceLevelUpdate updates = 4;
+}
+
+message PriceLevelUpdate {
+  enum Side {
+    BID = 0;
+    ASK = 1;
+  }
+  Side side = 1;
+  string price = 2;
+  string quantity = 3;   // 0 = remove level
+}
+
+// ───────────────────────── Trades / Ticker / Mark ─────────────────────────
+
+message TradeUpdate {
+  int32 market_id = 1;
+  int64 trade_id = 2;
+  string price = 3;
+  string quantity = 4;
+  bool is_buyer_maker = 5;
+  int64 timestamp_utc_ticks = 6;
+}
+
+message TickerUpdate {
+  int32 market_id = 1;
+  string symbol = 2;
+  string last_price = 3;
+  string best_bid = 4;
+  string best_ask = 5;
+  string volume_24h = 6;
+  string price_change_24h = 7;
+  int64 timestamp_utc_ticks = 8;
+}
+
+message MarkPriceUpdate {
+  int32 market_id = 1;
+  string mark_price = 2;
+  string index_price = 3;
+  string funding_rate = 4;
+  int64 next_funding_time_utc_ticks = 5;
+  int64 timestamp_utc_ticks = 6;
+}
+
+// ───────────────────────── Subscription control ─────────────────────────
+
+message SubscribeRequest {
+  repeated int32 market_ids = 1;
+  bool order_book_l2 = 2;
+  bool trades = 3;
+  bool ticker = 4;
+  bool mark_price = 5;
+  int32 depth_levels = 6;   // default 10
+}
+
+message SubscribeResponse {
+  bool success = 1;
+  string message = 2;
+  repeated OrderBookSnapshot initial_snapshots = 3;
+}
+
+message MarketDataMessage {
+  oneof payload {
+    OrderBookSnapshot snapshot = 1;
+    OrderBookDelta delta = 2;
+    TradeUpdate trade = 3;
+    TickerUpdate ticker = 4;
+    MarkPriceUpdate mark_price = 5;
+  }
+}
+
+service MarketDataService {
+  // Server-streaming: client sends subscribe, server pushes continuous updates
+  rpc Subscribe (SubscribeRequest) returns (stream MarketDataMessage);
+
+  // Unary snapshot
+  rpc GetOrderBookSnapshot (GetSnapshotRequest) returns (OrderBookSnapshot);
+}
+
+message GetSnapshotRequest {
+  int32 market_id = 1;
+  int32 depth_levels = 2;
+}

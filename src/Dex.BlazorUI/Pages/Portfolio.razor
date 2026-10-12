@@ -1,0 +1,132 @@
+@page "/portfolio"
+@using Dex.BlazorUI.Models
+@using Dex.BlazorUI.Services
+@inject TradingPortfolioService PortfolioSvc
+@inject LiveMarketDataService Market
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="portfolio-page">
+    <div class="pf-header">
+        <div>
+            <h1>Portfolio Overview <span class="live-badge" style="margin-left:8px"><span class="dot"></span> Live</span></h1>
+            <p class="c-m" style="margin-top:4px">Balances, positions and risk</p>
+        </div>
+        <button class="btn-secondary" style="width:auto;padding:8px 14px" @onclick="() => PortfolioSvc.Deposit(10000)">+ 10,000 USDT</button>
+    </div>
+
+    <div class="pf-cards">
+        <div class="pf-card">
+            <div class="lbl">Total Equity</div>
+            <div class="val">$ @_equity.ToString("N2")</div>
+            <div class="sub">USDT</div>
+        </div>
+        <div class="pf-card">
+            <div class="lbl">Available Margin</div>
+            <div class="val">$ @_available.ToString("N2")</div>
+        </div>
+        <div class="pf-card">
+            <div class="lbl">Unrealized PnL</div>
+            <div class="val @(_upnl >= 0 ? "c-g" : "c-r")">@(_upnl >= 0 ? "+" : "")@_upnl.ToString("N2")</div>
+        </div>
+        <div class="pf-card">
+            <div class="lbl">Realized PnL</div>
+            <div class="val @(PortfolioSvc.RealizedPnl >= 0 ? "c-g" : "c-r")">@PortfolioSvc.RealizedPnl.ToString("N2")</div>
+        </div>
+        <div class="pf-card">
+            <div class="lbl">Risk Level</div>
+            <div class="val c-g">LOW</div>
+            <div class="sub">Margin usage @_usage.ToString("F1")%</div>
+        </div>
+    </div>
+
+    <div class="pf-grid">
+        <div class="pf-panel">
+            <h3>Account</h3>
+            <div class="alloc-row"><span class="name">USDT Balance</span><span class="mono">$ @PortfolioSvc.UsdtBalance.ToString("N2")</span></div>
+            <div class="alloc-row"><span class="name">Open Positions</span><span class="mono">@PortfolioSvc.Positions.Count</span></div>
+            <div class="alloc-row"><span class="name">Open Orders</span><span class="mono">@PortfolioSvc.OpenOrders.Count</span></div>
+            <div class="alloc-row"><span class="name">Trades</span><span class="mono">@PortfolioSvc.History.Count</span></div>
+        </div>
+        <div class="pf-panel">
+            <h3>Asset Allocation</h3>
+            @if (PortfolioSvc.Positions.Count == 0)
+            {
+                <div class="empty">No positions — allocation is 100% USDT</div>
+            }
+            else
+            {
+                @foreach (var p in PortfolioSvc.Positions)
+                {
+                    var notional = p.MarkPrice * p.Quantity;
+                    <div class="alloc-row">
+                        <span class="name"><span class="alloc-dot" style="background:var(--green)"></span> @p.Symbol</span>
+                        <span class="mono">$ @notional.ToString("N2")</span>
+                    </div>
+                }
+            }
+        </div>
+    </div>
+
+    <div class="pf-panel">
+        <h3>Open Positions</h3>
+        @if (PortfolioSvc.Positions.Count == 0)
+        {
+            <div class="empty">No open positions. <a class="c-g" href="/trade/BTC-USDT">Start trading</a></div>
+        }
+        else
+        {
+            <table class="data-table">
+                <thead><tr>
+                    <th>Market</th><th>Side</th><th class="r">Size</th><th class="r">Entry</th>
+                    <th class="r">Mark</th><th class="r">uPnL</th><th class="r">Liq.</th><th></th>
+                </tr></thead>
+                <tbody>
+                @foreach (var p in PortfolioSvc.Positions)
+                {
+                    <tr>
+                        <td class="fw6">@p.Symbol</td>
+                        <td class="@(p.Side == "Long" ? "c-g" : "c-r")">@p.Side @p.Leverage x</td>
+                        <td class="r">@p.Quantity.ToString("0.####")</td>
+                        <td class="r">@p.EntryPrice.ToString("N2")</td>
+                        <td class="r">@p.MarkPrice.ToString("N2")</td>
+                        <td class="r @(p.UnrealizedPnl >= 0 ? "c-g" : "c-r")">@p.UnrealizedPnl.ToString("N2")</td>
+                        <td class="r c-o">@p.LiquidationPrice.ToString("N2")</td>
+                        <td class="r">
+                            <button class="btn-sm" @onclick="() => Close(p.Symbol)">Close</button>
+                            <button class="btn-sm" style="margin-left:4px" @onclick="() => GoTrade(p.Symbol)">Trade</button>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
+@code {
+    private decimal _upnl => PortfolioSvc.Positions.Sum(p => p.UnrealizedPnl);
+    private decimal _available => PortfolioSvc.AvailableMargin(_upnl);
+    private decimal _equity => PortfolioSvc.UsdtBalance + _upnl + PortfolioSvc.Positions.Sum(p => p.Margin);
+    private decimal _usage => _equity > 0 ? PortfolioSvc.Positions.Sum(p => p.Margin) / _equity * 100m : 0;
+
+    protected override void OnInitialized()
+    {
+        PortfolioSvc.Changed += Refresh;
+        Market.UiRefreshRequested += Refresh;
+    }
+
+    private void Close(string sym)
+    {
+        var last = Market.AllLastPrices.GetValueOrDefault(sym);
+        PortfolioSvc.ClosePosition(sym, last, last, last);
+    }
+
+    private void GoTrade(string symbol) => Nav.NavigateTo("/trade/" + symbol);
+    private void Refresh() => InvokeAsync(StateHasChanged);
+    public void Dispose()
+    {
+        PortfolioSvc.Changed -= Refresh;
+        Market.UiRefreshRequested -= Refresh;
+    }
+}

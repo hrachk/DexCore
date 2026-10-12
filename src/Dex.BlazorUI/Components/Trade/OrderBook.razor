@@ -1,0 +1,51 @@
+@using Dex.BlazorUI.Models
+
+<div style="display:flex;flex-direction:column;height:100%;overflow:hidden">
+    <div class="panel-label" style="padding:8px 12px">Order Book</div>
+    <div class="ob-head"><span>Price</span><span class="r">Size</span><span class="r">Total</span></div>
+    <div style="flex:1;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end">
+        @foreach (var l in Asks.Take(12).Reverse())
+        {
+            var pct = MaxT > 0 ? (double)(l.Total / MaxT * 100m) : 0;
+            <div class="ob-row" @onclick="() => OnPriceClick.InvokeAsync(l.Price)">
+                <div class="ob-bar ask" style="width:@pct.ToString("F1")%"></div>
+                <span class="c-r" style="position:relative;z-index:1">@Fmt(l.Price)</span>
+                <span class="r" style="position:relative;z-index:1">@FmtQ(l.Quantity)</span>
+                <span class="r c-m" style="position:relative;z-index:1">@FmtQ(l.Total)</span>
+            </div>
+        }
+    </div>
+    <div class="ob-mid">
+        <span class="price c-g">@Fmt(Mid)</span>
+        <span class="c-m" style="font-size:10px">Spread @Fmt(Spread)</span>
+    </div>
+    <div style="flex:1;overflow:hidden">
+        @foreach (var l in Bids.Take(12))
+        {
+            var pct = MaxT > 0 ? (double)(l.Total / MaxT * 100m) : 0;
+            <div class="ob-row" @onclick="() => OnPriceClick.InvokeAsync(l.Price)">
+                <div class="ob-bar bid" style="width:@pct.ToString("F1")%"></div>
+                <span class="c-g" style="position:relative;z-index:1">@Fmt(l.Price)</span>
+                <span class="r" style="position:relative;z-index:1">@FmtQ(l.Quantity)</span>
+                <span class="r c-m" style="position:relative;z-index:1">@FmtQ(l.Total)</span>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public List<PriceLevel> Bids { get; set; } = new();
+    [Parameter] public List<PriceLevel> Asks { get; set; } = new();
+    [Parameter] public decimal Spread { get; set; }
+    [Parameter] public decimal Mid { get; set; }
+    [Parameter] public EventCallback<decimal> OnPriceClick { get; set; }
+    private decimal MaxT {
+        get {
+            var b = Bids.Count > 0 ? Bids[Math.Min(11, Bids.Count - 1)].Total : 0m;
+            var a = Asks.Count > 0 ? Asks[Math.Min(11, Asks.Count - 1)].Total : 0m;
+            return Math.Max(b, a);
+        }
+    }
+    private static string Fmt(decimal n) => n.ToString("N2", System.Globalization.CultureInfo.InvariantCulture);
+    private static string FmtQ(decimal n) => n.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+}

@@ -1,0 +1,177 @@
+@using Dex.BlazorUI.Models
+@using Dex.BlazorUI.Services
+
+<div class="order-form">
+    <div class="side-btns">
+        <button class="@(Side == OrderSide.Buy ? "buy-on" : "")" @onclick="() => Side = OrderSide.Buy">Buy / Long</button>
+        <button class="@(Side == OrderSide.Sell ? "sell-on" : "")" @onclick="() => Side = OrderSide.Sell">Sell / Short</button>
+    </div>
+    <div class="type-tabs">
+        <button class="@(Type == OrderType.Limit ? "on" : "")" @onclick="() => Type = OrderType.Limit">Limit</button>
+        <button class="@(Type == OrderType.Market ? "on" : "")" @onclick="() => Type = OrderType.Market">Market</button>
+    </div>
+    <div class="type-tabs">
+        <button class="@(Margin == MarginMode.Cross ? "on" : "")" @onclick="() => Margin = MarginMode.Cross">Cross</button>
+        <button class="@(Margin == MarginMode.Isolated ? "on" : "")" @onclick="() => Margin = MarginMode.Isolated">Isolated</button>
+    </div>
+    <div>
+        <div class="lev-line"><span>Leverage</span><strong>@Leverage x</strong></div>
+        <input type="range" min="1" max="@Market.MaxLeverage" @bind="Leverage" @bind:event="oninput" />
+    </div>
+    @if (Type != OrderType.Market)
+    {
+        <div class="field">
+            <label>Price</label>
+            <div class="field-row">
+                <input type="number" @bind="_priceText" step="@Market.TickSize" placeholder="@MidPrice.ToString(System.Globalization.CultureInfo.InvariantCulture)" />
+                <span class="unit">USDT</span>
+            </div>
+        </div>
+    }
+    <div class="field">
+        <label>Size</label>
+        <div class="field-row">
+            <input type="number" @bind="_qtyText" step="@Market.LotSize" placeholder="0.00" />
+            <span class="unit">@Market.Base</span>
+        </div>
+    </div>
+    <div class="pct-row">
+        @foreach (var p in new[] { 10, 25, 50, 75, 100 })
+        {
+            var pct = p;
+            <button @onclick="() => ApplyPct(pct)">@pct%</button>
+        }
+    </div>
+    <div class="tp-sl">
+        <div class="field">
+            <label class="c-g">Take Profit</label>
+            <div class="field-row">
+                <input type="number" @bind="_tpText" @bind:event="onchange" @bind:after="EmitLevels" step="@Market.TickSize" placeholder="TP" />
+            </div>
+        </div>
+        <div class="field">
+            <label class="c-o">Stop Loss</label>
+            <div class="field-row">
+                <input type="number" @bind="_slText" @bind:event="onchange" @bind:after="EmitLevels" step="@Market.TickSize" placeholder="SL" />
+            </div>
+        </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-2);cursor:pointer">
+        <input type="checkbox" @bind="ReduceOnly" /> Reduce-Only
+    </label>
+    <div class="meta-box">
+        <div class="meta-row"><span>Notional</span><span>$ @Notional.ToString("N2")</span></div>
+        <div class="meta-row"><span>Margin</span><span>$ @RequiredMargin.ToString("N2")</span></div>
+        <div class="meta-row"><span>Est. liq</span><span class="c-o">@FmtDec(EstLiq, Market.PriceDecimals)</span></div>
+        <div class="meta-row"><span>Available</span><span>$ @Available.ToString("N2")</span></div>
+    </div>
+    @if (!string.IsNullOrEmpty(_error)) { <div class="err-box">@_error</div> }
+    <button class="btn-submit @(Side == OrderSide.Buy ? "buy" : "sell")" disabled="@_busy" @onclick="Submit">
+        @(_busy ? "…" : ButtonLabel)
+    </button>
+    @if (HasPosition)
+    {
+        <button class="btn-sm" style="width:100%;padding:8px" @onclick="ClosePos">Close Position</button>
+    }
+</div>
+
+@code {
+    [Parameter] public MarketInfo Market { get; set; } = MarketCatalog.All[0];
+    [Parameter] public decimal MidPrice { get; set; }
+    [Parameter] public decimal BestBid { get; set; }
+    [Parameter] public decimal BestAsk { get; set; }
+    [Parameter] public decimal Available { get; set; }
+    [Parameter] public decimal Equity { get; set; }
+    [Parameter] public decimal UnrealizedPnl { get; set; }
+    [Parameter] public bool HasPosition { get; set; }
+    [Parameter] public string PositionSide { get; set; } = "Long";
+    [Parameter] public decimal PositionSize { get; set; }
+    [Parameter] public decimal EntryPrice { get; set; }
+    [Parameter] public decimal? PrefillPrice { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+    [Parameter] public EventCallback<string> OnToast { get; set; }
+    [Parameter] public EventCallback<(decimal? Tp, decimal? Sl)> OnLevelsChanged { get; set; }
+    [Parameter] public EventCallback<OrderConfirmRequest> OnConfirmRequest { get; set; }
+    [Inject] public TradingPortfolioService Portfolio { get; set; } = default!;
+
+    private OrderSide Side = OrderSide.Buy;
+    private OrderType Type = OrderType.Limit;
+    private MarginMode Margin = MarginMode.Cross;
+    private int Leverage = 5;
+    private bool ReduceOnly, _busy;
+    private string _priceText = "", _qtyText = "", _tpText = "", _slText = "", _error = "";
+    private string ButtonLabel => (Side == OrderSide.Buy ? "Buy / Long " : "Sell / Short ") + Market.Base;
+
+    protected override void OnParametersSet()
+    {
+        if (PrefillPrice is { } p && p > 0)
+            _priceText = p.ToString("F" + Market.PriceDecimals, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private decimal Notional
+    {
+        get
+        {
+            var q = Parse(_qtyText);
+            var p = Type == OrderType.Market ? MidPrice : Parse(_priceText);
+            return p * q;
+        }
+    }
+    private decimal RequiredMargin => Leverage > 0 ? Notional / Leverage : Notional;
+    private decimal EstLiq
+    {
+        get
+        {
+            var e = Type == OrderType.Market ? MidPrice : (Parse(_priceText) > 0 ? Parse(_priceText) : MidPrice);
+            if (e <= 0 || Leverage <= 0) return 0;
+            return Side == OrderSide.Buy ? e * (1m - 0.9m / Leverage) : e * (1m + 0.9m / Leverage);
+        }
+    }
+
+    private static decimal Parse(string s) =>
+        decimal.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : 0m;
+
+    private void ApplyPct(int pct)
+    {
+        var px = Type == OrderType.Market ? MidPrice : (Parse(_priceText) > 0 ? Parse(_priceText) : MidPrice);
+        if (px <= 0 || Available <= 0) return;
+        var lots = Math.Floor(Available * (pct / 100m) * Leverage / px / Market.LotSize) * Market.LotSize;
+        _qtyText = lots.ToString("0.########", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private async Task EmitLevels()
+    {
+        await OnLevelsChanged.InvokeAsync((Parse(_tpText) > 0 ? Parse(_tpText) : null, Parse(_slText) > 0 ? Parse(_slText) : null));
+    }
+
+    private async Task ClosePos()
+    {
+        Portfolio.ClosePosition(Market.Symbol, MidPrice, BestBid, BestAsk);
+        await OnToast.InvokeAsync($"Closed {Market.Symbol}");
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task Submit()
+    {
+        _error = "";
+        var qty = Parse(_qtyText);
+        if (qty <= 0) { _error = "Enter size"; return; }
+        var price = Type == OrderType.Market ? MidPrice : Parse(_priceText);
+        if (Type != OrderType.Market && price <= 0) { _error = "Enter price"; return; }
+        if (RequiredMargin > Available && !ReduceOnly) { _error = "Need $" + RequiredMargin.ToString("N2") + " margin"; return; }
+
+        var model = new OrderConfirmRequest
+        {
+            Side = Side, Type = Type, Price = price, Qty = qty, Leverage = Leverage,
+            MarginMode = Margin, ReduceOnly = ReduceOnly,
+            Margin = RequiredMargin, Liq = EstLiq, Fee = Notional * 0.0004m,
+            Tp = Parse(_tpText) > 0 ? Parse(_tpText) : null,
+            Sl = Parse(_slText) > 0 ? Parse(_slText) : null
+        };
+        await OnConfirmRequest.InvokeAsync(model);
+    }
+
+    private static string FmtDec(decimal n, int d) => n.ToString("N" + d, System.Globalization.CultureInfo.InvariantCulture);
+    private static string FmtPct(decimal ch) => (ch >= 0 ? "+" : "") + ch.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+}

@@ -1,0 +1,15 @@
+{
+  "name": "dexcore-contracts",
+  "version": "1.0.0",
+  "description": "Institutional DEX Settlement, Vault & Risk Guard contracts",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "clean": "hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "hardhat": "^2.22.0"
+  }
+}

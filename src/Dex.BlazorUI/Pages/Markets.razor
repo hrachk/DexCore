@@ -1,0 +1,104 @@
+@page "/markets"
+@using Dex.BlazorUI.Models
+@using Dex.BlazorUI.Services
+@inject LiveMarketDataService Market
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="markets-page">
+    <aside class="markets-side">
+        <h3>Sectors</h3>
+        @foreach (var s in new[] { "ALL", "Layer1", "DeFi", "Meme" })
+        {
+            <button class="sector-btn @(_sector == s ? "active" : "")" @onclick="() => _sector = s">@s</button>
+        }
+    </aside>
+    <main class="markets-main">
+        <h1>Markets</h1>
+        <p class="sub">Live prices from Binance · @Filtered.Count() pairs · @Market.StatusMessage</p>
+        <div class="markets-filters">
+            <input class="search-box" style="width:260px;margin:0" placeholder="Filter pairs…" @bind="_q" @bind:event="oninput" />
+            <button class="chip @(_sector == "ALL" ? "active" : "")" @onclick='() => _sector = "ALL"'>ALL</button>
+            <button class="chip @(_sector == "Layer1" ? "active" : "")" @onclick='() => _sector = "Layer1"'>LAYER1</button>
+            <button class="chip @(_sector == "DeFi" ? "active" : "")" @onclick='() => _sector = "DeFi"'>DEFI</button>
+            <button class="chip @(_sector == "Meme" ? "active" : "")" @onclick='() => _sector = "Meme"'>MEME</button>
+            <span class="c-m" style="margin-left:auto">@(Market.IsConnected ? "● LIVE" : "○ Connecting")</span>
+        </div>
+        <div class="markets-table-wrap">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Symbol</th>
+                        <th class="r">Last Price</th>
+                        <th class="r">24h Change</th>
+                        <th class="r">Volume (24h)</th>
+                        <th class="r">High</th>
+                        <th class="r">Low</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @{ var i = 0; }
+                    @foreach (var m in Filtered)
+                    {
+                        i++;
+                        Market.AllTickers.TryGetValue(m.Symbol, out var tk);
+                        var px = tk?.LastPrice ?? Market.AllLastPrices.GetValueOrDefault(m.Symbol);
+                        var ch = tk?.PriceChangePercent24h ?? Market.AllChangePct.GetValueOrDefault(m.Symbol);
+                        <tr style="cursor:pointer" @onclick="() => GoTrade(m.Symbol)">
+                            <td class="c-m">@i</td>
+                            <td class="fw6">@m.Base <span class="c-m">/@m.Quote</span></td>
+                            <td class="r mono">@(px > 0 ? FmtDec(px, m.PriceDecimals) : "—")</td>
+                            <td class="r mono @(ch >= 0 ? "c-g" : "c-r")">@(px > 0 ? FmtPct(ch) : "—")</td>
+                            <td class="r mono">@(tk is null ? "—" : FmtVol(tk.QuoteVolume24h))</td>
+                            <td class="r mono">@(tk is null || tk.High24h <= 0 ? "—" : FmtDec(tk.High24h, m.PriceDecimals))</td>
+                            <td class="r mono">@(tk is null || tk.Low24h <= 0 ? "—" : FmtDec(tk.Low24h, m.PriceDecimals))</td>
+                            <td class="r"><button class="btn-sm" @onclick:stopPropagation="true" @onclick="() => GoTrade(m.Symbol)">Trade</button></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </main>
+</div>
+
+@code {
+    private string _q = "", _sector = "ALL";
+
+    private IEnumerable<MarketInfo> Filtered
+    {
+        get
+        {
+            var list = MarketCatalog.All.AsEnumerable();
+            if (!string.IsNullOrWhiteSpace(_q))
+                list = list.Where(m => m.Symbol.Contains(_q, StringComparison.OrdinalIgnoreCase)
+                                    || m.Base.Contains(_q, StringComparison.OrdinalIgnoreCase));
+            if (_sector == "Layer1")
+                list = list.Where(m => new[] { "BTC", "ETH", "SOL", "ADA", "AVAX", "DOT", "ATOM", "NEAR", "SUI", "APT", "BNB" }.Contains(m.Base));
+            else if (_sector == "DeFi")
+                list = list.Where(m => new[] { "UNI", "AAVE", "LINK", "INJ" }.Contains(m.Base));
+            else if (_sector == "Meme")
+                list = list.Where(m => new[] { "DOGE", "PEPE", "WIF" }.Contains(m.Base));
+            return list;
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Market.UiRefreshRequested += Refresh;
+        await Market.StartAsync(MarketCatalog.All[0]);
+    }
+
+    private void GoTrade(string symbol) => Nav.NavigateTo("/trade/" + symbol);
+    private void Refresh() => InvokeAsync(StateHasChanged);
+    public void Dispose() => Market.UiRefreshRequested -= Refresh;
+
+    private static string FmtDec(decimal n, int d) => n.ToString("N" + d, System.Globalization.CultureInfo.InvariantCulture);
+    private static string FmtPct(decimal ch) => (ch >= 0 ? "+" : "") + ch.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + "%";
+    private static string FmtVol(decimal v) =>
+        v >= 1_000_000_000m ? "$" + (v / 1_000_000_000m).ToString("N2") + "B"
+        : v >= 1_000_000m ? "$" + (v / 1_000_000m).ToString("N2") + "M"
+        : v >= 1_000m ? "$" + (v / 1_000m).ToString("N1") + "K"
+        : "$" + v.ToString("N0");
+}

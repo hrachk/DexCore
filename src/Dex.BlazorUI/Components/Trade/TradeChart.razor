@@ -1,0 +1,75 @@
+@using System.Text.Json
+@using Dex.BlazorUI.Models
+@inject IJSRuntime Js
+@implements IAsyncDisposable
+
+<div style="position:relative;width:100%;height:100%">
+    @if (TakeProfit is > 0)
+    {
+        <div style="position:absolute;top:12px;right:64px;z-index:8;pointer-events:none">
+            <div class="neon-badge tp">TAKE-PROFIT @TakeProfit.Value.ToString("N2")</div>
+        </div>
+    }
+    @if (StopLoss is > 0)
+    {
+        <div style="position:absolute;bottom:24px;right:64px;z-index:8;pointer-events:none">
+            <div class="neon-badge sl">STOP-LOSS @StopLoss.Value.ToString("N2")</div>
+        </div>
+    }
+    <div id="@_id" class="chart-host"></div>
+</div>
+
+@code {
+    [Parameter] public string Symbol { get; set; } = "BTC-USDT";
+    [Parameter] public List<Candle> Candles { get; set; } = new();
+    [Parameter] public TradeTick? LastTrade { get; set; }
+    [Parameter] public decimal? TakeProfit { get; set; }
+    [Parameter] public decimal? StopLoss { get; set; }
+    [Parameter] public decimal? Entry { get; set; }
+
+    private readonly string _id = "c-" + Guid.NewGuid().ToString("N")[..8];
+    private string _sym = "";
+    private bool _ready;
+    private int _n;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender || _sym != Symbol || (Candles.Count > 0 && Candles.Count != _n))
+        {
+            _sym = Symbol;
+            _n = Candles.Count;
+            object data;
+            if (Candles.Count > 0)
+                data = Candles.Select(c => new { time = c.Time, open = (double)c.Open, high = (double)c.High, low = (double)c.Low, close = (double)c.Close }).ToArray();
+            else
+                data = await Js.InvokeAsync<JsonElement>("dexChart.generateSeedCandles", 95000.0, 120);
+            await Js.InvokeAsync<bool>("dexChart.init", _id, data, new {
+                takeProfit = TakeProfit.HasValue ? (double?)TakeProfit : null,
+                stopLoss = StopLoss.HasValue ? (double?)StopLoss : null,
+                entry = Entry.HasValue ? (double?)Entry : null
+            });
+            _ready = true;
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!_ready) return;
+        await Js.InvokeVoidAsync("dexChart.setLevels", _id, new {
+            takeProfit = TakeProfit.HasValue ? (double?)TakeProfit : null,
+            stopLoss = StopLoss.HasValue ? (double?)StopLoss : null,
+            entry = Entry.HasValue ? (double?)Entry : null
+        });
+        if (LastTrade is not null)
+        {
+            var t = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60 * 60;
+            var p = (double)LastTrade.Price;
+            await Js.InvokeVoidAsync("dexChart.updateLast", _id, new { time = t, open = p, high = p, low = p, close = p });
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try { await Js.InvokeVoidAsync("dexChart.dispose", _id); } catch { }
+    }
+}

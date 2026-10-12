@@ -1,0 +1,223 @@
+@page "/"
+@page "/trade"
+@page "/trade/{Symbol}"
+@using Dex.BlazorUI.Components.Trade
+@using Dex.BlazorUI.Models
+@using Dex.BlazorUI.Services
+@inject LiveMarketDataService Market
+@inject TradingPortfolioService Portfolio
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="trade-layout">
+    <div class="trade-ticker">
+        <div class="tt-pair"><span class="live-dot"></span> @_market.Symbol</div>
+        <div>
+            <div class="tt-price @(_chg >= 0 ? "c-g" : "c-r")">@FmtDec(_last, _market.PriceDecimals)</div>
+            <div class="tt-chg @(_chg >= 0 ? "c-g" : "c-r")">@(_chg >= 0 ? "+" : "")@_chg.ToString("F2")%</div>
+        </div>
+        <div class="tt-stats">
+            <div class="tt-stat"><span class="lbl">Mark</span><span class="val">@FmtDec(_last, _market.PriceDecimals)</span></div>
+            <div class="tt-stat"><span class="lbl">24h High</span><span class="val">@FmtDec(Market.Ticker?.High24h ?? 0, _market.PriceDecimals)</span></div>
+            <div class="tt-stat"><span class="lbl">24h Low</span><span class="val">@FmtDec(Market.Ticker?.Low24h ?? 0, _market.PriceDecimals)</span></div>
+            <div class="tt-stat"><span class="lbl">24h Vol</span><span class="val">@FmtVol(Market.Ticker?.QuoteVolume24h ?? 0)</span></div>
+            <div class="tt-stat"><span class="lbl">Bid</span><span class="val c-g">@FmtDec(_bid, _market.PriceDecimals)</span></div>
+            <div class="tt-stat"><span class="lbl">Ask</span><span class="val c-r">@FmtDec(_ask, _market.PriceDecimals)</span></div>
+        </div>
+    </div>
+
+    <aside class="trade-left">
+        <div class="panel-label">Markets <span class="c-m">@MarketCatalog.All.Length</span></div>
+        <input class="search-box" placeholder="Search markets…" @bind="_search" @bind:event="oninput" />
+        <div class="mkt-list">
+            @foreach (var m in Filtered)
+            {
+                var active = m.Symbol == _market.Symbol;
+                var px = Market.AllLastPrices.GetValueOrDefault(m.Symbol);
+                var ch = Market.AllChangePct.GetValueOrDefault(m.Symbol);
+                <div class="mkt-item @(active ? "active" : "")" @onclick="() => Go(m.Symbol)">
+                    <div>
+                        <div class="sym">@m.Base<span class="sub">/@m.Quote</span></div>
+                    </div>
+                    <div>
+                        <div class="px @(ch >= 0 ? "c-g" : "c-r")">@(px > 0 ? FmtDec(px, Math.Min(m.PriceDecimals, 4)) : "—")</div>
+                        <div class="chg @(ch >= 0 ? "c-g" : "c-r")">@(px > 0 ? FmtPct(ch) : "")</div>
+                    </div>
+                </div>
+            }
+        </div>
+    </aside>
+
+    <section class="trade-center">
+        <div class="chart-toolbar">
+            @foreach (var tf in new[] { "1m", "5m", "15m", "1h", "4h", "1D" })
+            {
+                <button class="tf @(_tf == tf ? "active" : "")" @onclick="() => _tf = tf">@tf</button>
+            }
+            <span class="c-m" style="margin-left:auto;font-size:11px">@_market.Symbol · DexCore</span>
+        </div>
+        <div class="chart-area">
+            <TradeChart Symbol="@_market.Symbol" Candles="@Market.Candles" LastTrade="@_lastTrade"
+                        TakeProfit="@_tp" StopLoss="@_sl" Entry="@_entry" />
+        </div>
+    </section>
+
+    <aside class="trade-right">
+        <div class="book-section">
+            <OrderBook Bids="@Market.Book.Bids" Asks="@Market.Book.Asks"
+                       Spread="@Market.Book.Spread" Mid="@_mid" OnPriceClick="p => _prefill = p" />
+        </div>
+        <div class="form-section">
+            <OrderForm Market="@_market" MidPrice="@_last" BestBid="@_bid" BestAsk="@_ask"
+                       Available="@_available" Equity="@_equity" UnrealizedPnl="@_upnl"
+                       HasPosition="@(_pos is not null)" PositionSide="@(_pos?.Side ?? "Long")"
+                       PositionSize="@(_pos?.Quantity ?? 0)" EntryPrice="@(_pos?.EntryPrice ?? 0)"
+                       PrefillPrice="@_prefill"
+                       OnChanged="() => StateHasChanged()"
+                       OnToast="ShowToast"
+                       OnLevelsChanged="OnLevels"
+                       OnConfirmRequest="ShowConfirm" />
+        </div>
+    </aside>
+
+    <div class="trade-bottom">
+        <BottomPanel Positions="@Portfolio.Positions.ToList()" Orders="@Portfolio.OpenOrders.ToList()"
+                     History="@Portfolio.History.ToList()"
+                     OnCancelOrder="CancelOrder" OnClosePosition="ClosePos" />
+    </div>
+</div>
+
+<div class="footer-bar">
+    <span>FEED <strong class="ok">@Market.DataSource</strong></span>
+    <span>STATUS <strong class="ok">@Market.StatusMessage</strong></span>
+    <span>ORDERS <strong>@Portfolio.OpenOrders.Count</strong></span>
+    <span>POSITIONS <strong>@Portfolio.Positions.Count</strong></span>
+    <span style="margin-left:auto">Total uPnL <strong class="@(_upnl >= 0 ? "ok" : "c-r")">@(_upnl >= 0 ? "+" : "")@_upnl.ToString("N2")</strong></span>
+</div>
+
+@if (_toast is not null)
+{
+    <div class="toast"><span class="dot"></span><span>@_toast</span></div>
+}
+
+@if (_confirm is not null)
+{
+    <div class="modal-backdrop" @onclick="() => _confirm = null">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h2><span class="@(_confirm.Side == OrderSide.Buy ? "c-g" : "c-r")">@(_confirm.Side == OrderSide.Buy ? "↑" : "↓")</span> Confirm @(_confirm.Side == OrderSide.Buy ? "Long" : "Short") @_market.Symbol</h2>
+            <p class="hint">Review order details before execution.</p>
+            <div class="modal-row"><span class="k">Size</span><span class="v">@_confirm.Qty.ToString("0.####") @_market.Base</span></div>
+            <div class="modal-row"><span class="k">Type</span><span class="v">@_confirm.Type</span></div>
+            <div class="modal-row"><span class="k">Price</span><span class="v">@(_confirm.Type == OrderType.Market ? "Market" : FmtDec(_confirm.Price, _market.PriceDecimals))</span></div>
+            <div class="modal-row"><span class="k">Leverage</span><span class="v">@_confirm.Leverage x</span></div>
+            <div class="modal-row"><span class="k">Margin</span><span class="v">@_confirm.Margin.ToString("N2") USDT</span></div>
+            <div class="modal-row"><span class="k">Est. Liq.</span><span class="v c-r">@FmtDec(_confirm.Liq, _market.PriceDecimals)</span></div>
+            <div class="modal-row"><span class="k">Fee ~4bps</span><span class="v">@_confirm.Fee.ToString("N2") USDT</span></div>
+            @if (_confirm.Tp is not null) { <div class="modal-row"><span class="k">Take Profit</span><span class="v c-g">@FmtDec(_confirm.Tp.Value, _market.PriceDecimals)</span></div> }
+            @if (_confirm.Sl is not null) { <div class="modal-row"><span class="k">Stop Loss</span><span class="v c-o">@FmtDec(_confirm.Sl.Value, _market.PriceDecimals)</span></div> }
+            <div class="modal-actions">
+                <button class="btn-primary" @onclick="ExecuteConfirm">Confirm Order</button>
+                <button class="btn-secondary" @onclick="() => _confirm = null">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Symbol { get; set; }
+
+    private MarketInfo _market = MarketCatalog.All[0];
+    private string _search = "", _tf = "1m";
+    private string? _toast;
+    private TradeTick? _lastTrade;
+    private decimal? _prefill, _tp, _sl, _entry;
+    private OrderConfirmRequest? _confirm;
+    private CancellationTokenSource? _toastCts;
+
+    private decimal _last => Market.Ticker?.LastPrice ?? Market.Book.Mid;
+    private decimal _bid => Market.Ticker?.BestBid ?? (Market.Book.Bids.FirstOrDefault()?.Price ?? 0);
+    private decimal _ask => Market.Ticker?.BestAsk ?? (Market.Book.Asks.FirstOrDefault()?.Price ?? 0);
+    private decimal _mid => Market.Book.Mid > 0 ? Market.Book.Mid : _last;
+    private decimal _chg => Market.Ticker?.PriceChangePercent24h ?? 0;
+    private decimal _upnl => Portfolio.Positions.Sum(p => p.UnrealizedPnl);
+    private decimal _available => Portfolio.AvailableMargin(_upnl);
+    private decimal _equity => Portfolio.UsdtBalance + _upnl + Portfolio.Positions.Sum(p => p.Margin);
+    private PositionRow? _pos => Portfolio.Positions.FirstOrDefault(p => p.Symbol == _market.Symbol);
+
+    private IEnumerable<MarketInfo> Filtered =>
+        string.IsNullOrWhiteSpace(_search) ? MarketCatalog.All
+        : MarketCatalog.All.Where(m => m.Symbol.Contains(_search, StringComparison.OrdinalIgnoreCase)
+                                    || m.Base.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _market = MarketCatalog.Get(string.IsNullOrWhiteSpace(Symbol) ? "BTC-USDT" : Symbol);
+        Market.UiRefreshRequested -= OnMd;
+        Market.UiRefreshRequested += OnMd;
+        Portfolio.Changed -= OnPf;
+        Portfolio.Changed += OnPf;
+        await Market.StartAsync(_market);
+    }
+
+    private void OnMd()
+    {
+        if (Market.Trades.Count > 0) _lastTrade = Market.Trades[0];
+        if (_last > 0) Portfolio.OnPriceTick(_market.Symbol, _last, _bid, _ask);
+        if (_pos is not null) _entry = _pos.EntryPrice;
+        InvokeAsync(StateHasChanged);
+    }
+    private void OnPf() => InvokeAsync(StateHasChanged);
+
+    private void Go(string sym) => Nav.NavigateTo("/trade/" + sym);
+    private void OnLevels((decimal? Tp, decimal? Sl) l) { _tp = l.Tp; _sl = l.Sl; }
+
+    private void ShowConfirm(OrderConfirmRequest m) => _confirm = m;
+
+    private async Task ExecuteConfirm()
+    {
+        if (_confirm is null) return;
+        var c = _confirm;
+        _confirm = null;
+        var (ok, msg, _) = Portfolio.PlaceOrder(
+            _market, c.Side, c.Type, c.Price, c.Qty, c.Leverage, c.MarginMode, c.ReduceOnly,
+            c.Tp, c.Sl, _bid, _ask, _last);
+        await ShowToast(ok ? $"{msg}: {c.Side} {c.Qty} {_market.Base}" : msg);
+        StateHasChanged();
+    }
+
+    private async Task CancelOrder(long id)
+    {
+        if (Portfolio.CancelOrder(id)) await ShowToast($"Cancelled #{id}");
+    }
+
+    private async Task ClosePos(string symbol)
+    {
+        Portfolio.ClosePosition(symbol, _last, _bid, _ask);
+        await ShowToast($"Closed {symbol}");
+    }
+
+    private async Task ShowToast(string msg)
+    {
+        _toastCts?.Cancel();
+        _toastCts = new CancellationTokenSource();
+        _toast = msg;
+        StateHasChanged();
+        try { await Task.Delay(2800, _toastCts.Token); _toast = null; await InvokeAsync(StateHasChanged); }
+        catch (OperationCanceledException) { }
+    }
+
+    private static string FmtVol(decimal v) =>
+        v >= 1e9m ? $"${v / 1e9m:N2}B" : v >= 1e6m ? $"${v / 1e6m:N2}M" : v >= 1e3m ? $"${v / 1e3m:N1}K" : $"${v:N0}";
+
+    public void Dispose()
+    {
+        Market.UiRefreshRequested -= OnMd;
+        Portfolio.Changed -= OnPf;
+        _toastCts?.Cancel();
+        _ = Market.StopAsync();
+    }
+
+    private static string FmtDec(decimal n, int d) => n.ToString("N" + d, System.Globalization.CultureInfo.InvariantCulture);
+    private static string FmtPct(decimal ch) => (ch >= 0 ? "+" : "") + ch.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+}

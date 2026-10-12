@@ -1,0 +1,107 @@
+@using Dex.BlazorUI.Models
+
+<div style="display:flex;flex-direction:column;height:100%">
+    <div class="tabs">
+        <button class="@(_tab == 0 ? "active" : "")" @onclick="() => _tab = 0">Positions <span class="cnt">@Positions.Count</span></button>
+        <button class="@(_tab == 1 ? "active" : "")" @onclick="() => _tab = 1">Open Orders <span class="cnt">@Orders.Count</span></button>
+        <button class="@(_tab == 2 ? "active" : "")" @onclick="() => _tab = 2">Trade History</button>
+    </div>
+    <div class="table-wrap">
+        @if (_tab == 0)
+        {
+            @if (Positions.Count == 0) { <div class="empty">No open positions</div> }
+            else
+            {
+                <table class="data-table">
+                    <thead><tr>
+                        <th>Market</th><th>Side</th><th class="r">Size</th><th class="r">Entry</th>
+                        <th class="r">Mark</th><th class="r">uPnL</th><th class="r">ROE</th>
+                        <th class="r">Liq. Price</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                    @foreach (var p in Positions)
+                    {
+                        var roe = p.Margin > 0 ? p.UnrealizedPnl / p.Margin * 100m : 0m;
+                        <tr>
+                            <td class="fw6">@p.Symbol</td>
+                            <td class="@(p.Side == "Long" ? "c-g" : "c-r")">@p.Side @p.Leverage x</td>
+                            <td class="r">@p.Quantity.ToString("0.####")</td>
+                            <td class="r">@p.EntryPrice.ToString("N2")</td>
+                            <td class="r">@p.MarkPrice.ToString("N2")</td>
+                            <td class="r fw6 @(p.UnrealizedPnl >= 0 ? "c-g" : "c-r")">@(p.UnrealizedPnl >= 0 ? "+" : "")@p.UnrealizedPnl.ToString("N2")</td>
+                            <td class="r @(roe >= 0 ? "c-g" : "c-r")">@roe.ToString("F1")%</td>
+                            <td class="r c-o">@p.LiquidationPrice.ToString("N2")</td>
+                            <td class="r"><button class="btn-sm" @onclick="() => OnClosePosition.InvokeAsync(p.Symbol)">Close</button></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        }
+        else if (_tab == 1)
+        {
+            @if (Orders.Count == 0) { <div class="empty">No open orders</div> }
+            else
+            {
+                <table class="data-table">
+                    <thead><tr>
+                        <th>Market</th><th>Side</th><th>Type</th><th class="r">Price</th>
+                        <th class="r">Size</th><th class="r">Filled</th><th>Status</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                    @foreach (var o in Orders)
+                    {
+                        <tr>
+                            <td class="fw6">@o.Symbol</td>
+                            <td class="@(o.Side == OrderSide.Buy ? "c-g" : "c-r")">@o.Side</td>
+                            <td>@o.Type</td>
+                            <td class="r">@o.Price.ToString("N2")</td>
+                            <td class="r">@o.Quantity.ToString("0.####")</td>
+                            <td class="r">@o.FilledQuantity.ToString("0.####")</td>
+                            <td class="c-m">@o.Status</td>
+                            <td class="r"><button class="btn-sm" @onclick="() => OnCancelOrder.InvokeAsync(o.OrderId)">Cancel</button></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        }
+        else
+        {
+            @if (History.Count == 0) { <div class="empty">No trades yet</div> }
+            else
+            {
+                <table class="data-table">
+                    <thead><tr><th>Time</th><th>Market</th><th>Side</th><th class="r">Price</th><th class="r">Size</th><th class="r">Fee</th></tr></thead>
+                    <tbody>
+                    @foreach (var h in History)
+                    {
+                        <tr>
+                            <td class="c-m">@FmtTime(h.TimestampTicks)</td>
+                            <td class="fw6">@h.Symbol</td>
+                            <td class="@(h.Side == OrderSide.Buy ? "c-g" : "c-r")">@h.Side</td>
+                            <td class="r">@h.Price.ToString("N2")</td>
+                            <td class="r">@h.Quantity.ToString("0.####")</td>
+                            <td class="r c-m">@h.Fee.ToString("N2")</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public List<PositionRow> Positions { get; set; } = new();
+    [Parameter] public List<OpenOrder> Orders { get; set; } = new();
+    [Parameter] public List<TradeHistoryRow> History { get; set; } = new();
+    [Parameter] public EventCallback<long> OnCancelOrder { get; set; }
+    [Parameter] public EventCallback<string> OnClosePosition { get; set; }
+    private int _tab;
+    private static string FmtTime(long ticks)
+    {
+        try { return new DateTime(ticks, DateTimeKind.Utc).ToLocalTime().ToString("MM-dd HH:mm:ss"); }
+        catch { return "—"; }
+    }
+}
