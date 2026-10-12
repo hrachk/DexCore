@@ -7,7 +7,7 @@ using Dex.MatchingEngine.OrderBook;
 using Dex.RiskEngine.Services;
 using Microsoft.Extensions.Logging;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(args); 
 
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<DeltaCompressionEngine>();
