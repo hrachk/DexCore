@@ -1,36 +1,36 @@
-using System.Threading.Channels;
 using Dex.ApiGateway.Auth;
 using Dex.ApiGateway.RateLimiting;
 using Dex.Domain.Orders;
 using Dex.MatchingEngine;
-using Dex.RiskEngine.Models;
 using Dex.RiskEngine.Services;
 using Microsoft.Extensions.Logging;
 
 namespace Dex.ApiGateway.Services;
 
 /// <summary>
-/// In-process trading session handler used by both gRPC bi-di stream and REST fallbacks.
-/// Performs HMAC auth, rate limiting, pre-trade risk check, then forwards to MatchingEngine.
+/// Trading session: rate-limit → risk → MatchingEngineHost (sync result) → SignalR book fan-out.
 /// </summary>
 public sealed class TradingSessionService
 {
-    private readonly MatchingEngine.MatchingEngine _matchingEngine;
+    private readonly MatchingEngineHost _host;
     private readonly global::Dex.RiskEngine.Services.RiskEngine _riskEngine;
+    private readonly MarketDataBroadcaster _broadcaster;
     private readonly HmacAuthService _auth;
     private readonly CompositeRateLimiter _rateLimiter;
     private readonly ILogger<TradingSessionService> _logger;
     private long _nextOrderId = 1_000_000;
 
     public TradingSessionService(
-        MatchingEngine.MatchingEngine matchingEngine,
+        MatchingEngineHost host,
         global::Dex.RiskEngine.Services.RiskEngine riskEngine,
+        MarketDataBroadcaster broadcaster,
         HmacAuthService auth,
         CompositeRateLimiter rateLimiter,
         ILogger<TradingSessionService> logger)
     {
-        _matchingEngine = matchingEngine;
+        _host = host;
         _riskEngine = riskEngine;
+        _broadcaster = broadcaster;
         _auth = auth;
         _rateLimiter = rateLimiter;
         _logger = logger;
@@ -39,7 +39,7 @@ public sealed class TradingSessionService
     public bool Authenticate(string apiKey, string timestamp, string signature, string method, string path, string body)
         => _auth.TryAuthenticate(apiKey, timestamp, method, path, body, signature);
 
-    public async Task<(bool Success, long OrderId, OrderStatus Status, string Message, decimal Remaining)> PlaceOrderAsync(
+    public async Task<(bool Success, long OrderId, OrderStatus Status, string Message, decimal Remaining, int FillCount)> PlaceOrderAsync(
         long accountId,
         long clientOrderId,
         int marketId,
@@ -55,7 +55,7 @@ public sealed class TradingSessionService
         CancellationToken ct = default)
     {
         if (!_rateLimiter.TryAcquire(ip, apiKey))
-            return (false, 0, OrderStatus.Rejected, "Rate limit exceeded", 0m);
+            return (false, 0, OrderStatus.Rejected, "Rate limit exceeded", 0m, 0);
 
         var orderId = Interlocked.Increment(ref _nextOrderId);
         var order = new Order(
@@ -72,23 +72,55 @@ public sealed class TradingSessionService
             reduceOnly: reduceOnly,
             postOnly: postOnly);
 
-        // Pre-trade risk
         var risk = _riskEngine.ValidateOrder(order, Domain.Risk.MarginMode.Cross);
         if (!risk.IsAccepted)
         {
-            _logger.LogWarning("Order rejected by risk: {Reason} for account {AccountId}", risk.RejectReason, accountId);
-            return (false, orderId, OrderStatus.Rejected, risk.Message, quantity);
+            _logger.LogWarning("Order rejected by risk: {Reason} account={AccountId}", risk.RejectReason, accountId);
+            return (false, orderId, OrderStatus.Rejected, risk.Message, quantity, 0);
         }
 
-        await _matchingEngine.PlaceOrderAsync(order, ct).ConfigureAwait(false);
+        var engine = _host.GetOrCreate(marketId);
+        _broadcaster.RegisterMarket(marketId, $"MKT-{marketId}", engine.Book);
 
-        // In a full system we would await the MatchingResult from the outbound channel.
-        // Here we optimistically return New; ExecutionReports are pushed asynchronously.
-        return (true, orderId, OrderStatus.New, "Accepted", quantity);
+        MatchingResult result;
+        try
+        {
+            result = await _host.PlaceOrderAsync(order, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Matching failed order={OrderId} market={MarketId}", orderId, marketId);
+            return (false, orderId, OrderStatus.Rejected, "Matching engine error", quantity, 0);
+        }
+
+        _broadcaster.PublishBookUpdate(marketId);
+
+        if (result.Trades.Count > 0)
+        {
+            foreach (var t in result.Trades)
+            {
+                _broadcaster.PublishTrade(new Models.TradeDto
+                {
+                    MarketId = marketId,
+                    TradeId = t.TradeId,
+                    Price = t.Price,
+                    Quantity = t.Quantity,
+                    IsBuyerMaker = t.TakerSide == OrderSide.Sell,
+                    TimestampUtcTicks = t.ExecutedAtTicks
+                });
+            }
+        }
+
+        var msg = result.Trades.Count > 0
+            ? $"Filled {result.Trades.Sum(x => x.Quantity)} across {result.Trades.Count} trade(s)"
+            : result.Status.ToString();
+
+        return (true, orderId, result.Status, msg, result.RemainingQuantity, result.Trades.Count);
     }
 
     public async Task<(bool Success, OrderStatus Status, string Message)> CancelOrderAsync(
         long orderId,
+        int marketId,
         string? apiKey,
         string? ip,
         CancellationToken ct = default)
@@ -96,7 +128,11 @@ public sealed class TradingSessionService
         if (!_rateLimiter.TryAcquire(ip, apiKey))
             return (false, OrderStatus.Rejected, "Rate limit exceeded");
 
-        await _matchingEngine.CancelOrderAsync(orderId, ct).ConfigureAwait(false);
-        return (true, OrderStatus.PendingCancel, "Cancel submitted");
+        if (!_host.TryGet(marketId, out var engine) || engine is null)
+            return (false, OrderStatus.Rejected, "Unknown market");
+
+        var result = await engine.CancelOrderAsync(orderId, ct).ConfigureAwait(false);
+        _broadcaster.PublishBookUpdate(marketId);
+        return (result.Status == OrderStatus.Cancelled, result.Status, result.Status.ToString());
     }
 }

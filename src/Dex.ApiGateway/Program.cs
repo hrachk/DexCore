@@ -19,16 +19,14 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<DeltaCompressionEngine>();
 builder.Services.AddSingleton<MarketDataBroadcaster>();
-builder.Services.AddSingleton(sp =>
-{
-    var logger = sp.GetRequiredService<ILogger<global::Dex.MatchingEngine.MatchingEngine>>();
-    return new global::Dex.MatchingEngine.MatchingEngine(marketId: 1, logger);
-});
+
+builder.Services.AddSingleton<MatchingEngineHost>(sp =>
+    new MatchingEngineHost(sp.GetRequiredService<ILoggerFactory>()));
+
 builder.Services.AddSingleton(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<global::Dex.RiskEngine.Services.RiskEngine>>();
     var risk = new global::Dex.RiskEngine.Services.RiskEngine(logger, initialInsuranceFund: 1_000_000m);
-    // Seed demo accounts so pre-trade checks pass
     risk.Deposit(1, 1_000_000m);
     risk.Deposit(100, 1_000_000m);
     risk.Deposit(200, 1_000_000m);
@@ -50,40 +48,56 @@ builder.Services.AddSingleton<TradingSessionService>();
 var app = builder.Build();
 app.UseCors();
 
-// CRITICAL: broadcaster must use the SAME book instance as MatchingEngine
+var host = app.Services.GetRequiredService<MatchingEngineHost>();
 var broadcaster = app.Services.GetRequiredService<MarketDataBroadcaster>();
-var engine = app.Services.GetRequiredService<global::Dex.MatchingEngine.MatchingEngine>();
-broadcaster.RegisterMarket(1, "BTC-USDT", engine.Book);
+var coreMarkets = new (int Id, string Symbol)[]
+{
+    (1, "BTC-USDT"), (2, "ETH-USDT"), (3, "SOL-USDT"), (4, "BNB-USDT"),
+    (5, "XRP-USDT"), (6, "DOGE-USDT"), (7, "ADA-USDT"), (8, "AVAX-USDT"),
+    (9, "LINK-USDT"), (10, "DOT-USDT")
+};
+foreach (var (id, sym) in coreMarkets)
+{
+    var eng = host.GetOrCreate(id);
+    broadcaster.RegisterMarket(id, sym, eng.Book);
+}
 
-// Background: publish book deltas after matching results
 _ = Task.Run(async () =>
 {
-    await foreach (var result in engine.Results.ReadAllAsync())
+    var engines = coreMarkets.Select(m => host.GetOrCreate(m.Id)).ToArray();
+    var tasks = engines.Select(async eng =>
     {
-        try { broadcaster.PublishBookUpdate(1); }
-        catch { /* ignore */ }
-    }
+        await foreach (var result in eng.Results.ReadAllAsync())
+        {
+            try { broadcaster.PublishBookUpdate(result.MarketId); }
+            catch { }
+        }
+    });
+    await Task.WhenAll(tasks);
 });
 
 app.MapHub<MarketDataHub>("/hubs/marketdata");
 
-app.MapGet("/health", () => Results.Ok(new
+app.MapGet("/health", () =>
 {
-    status = "healthy",
-    service = "Dex.ApiGateway",
-    bestBid = engine.Book.BestBid,
-    bestAsk = engine.Book.BestAsk
-}));
+    var books = coreMarkets.Select(m =>
+    {
+        var eng = host.GetOrCreate(m.Id);
+        return new { marketId = m.Id, symbol = m.Symbol, bestBid = eng.Book.BestBid, bestAsk = eng.Book.BestAsk };
+    });
+    return Results.Ok(new { status = "healthy", service = "Dex.ApiGateway", markets = books });
+});
 
 app.MapGet("/api/v1/book/{marketId:int}", (int marketId) =>
 {
-    if (marketId != 1) return Results.NotFound();
-    var (bids, asks) = engine.Book.GetDepth(20);
+    if (!host.TryGet(marketId, out var eng) || eng is null)
+        return Results.NotFound();
+    var (bids, asks) = eng.Book.GetDepth(20);
     return Results.Ok(new
     {
         marketId,
-        bestBid = engine.Book.BestBid,
-        bestAsk = engine.Book.BestAsk,
+        bestBid = eng.Book.BestBid,
+        bestAsk = eng.Book.BestAsk,
         bids = bids.Select(l => new { price = l.Item1, quantity = l.Item2 }),
         asks = asks.Select(l => new { price = l.Item1, quantity = l.Item2 })
     });
@@ -92,7 +106,7 @@ app.MapGet("/api/v1/book/{marketId:int}", (int marketId) =>
 app.MapPost("/api/v1/order", async (PlaceOrderHttpRequest req, TradingSessionService trading, HttpContext ctx) =>
 {
     var ip = ctx.Connection.RemoteIpAddress?.ToString();
-    var (ok, orderId, status, message, remaining) = await trading.PlaceOrderAsync(
+    var (ok, orderId, status, message, remaining, fills) = await trading.PlaceOrderAsync(
         accountId: req.AccountId,
         clientOrderId: req.ClientOrderId,
         marketId: req.MarketId,
@@ -107,14 +121,14 @@ app.MapPost("/api/v1/order", async (PlaceOrderHttpRequest req, TradingSessionSer
         ip: ip);
 
     return ok
-        ? Results.Ok(new { orderId, status = status.ToString(), remaining, message })
+        ? Results.Ok(new { orderId, status = status.ToString(), remaining, fills, message })
         : Results.BadRequest(new { error = message, status = status.ToString() });
 });
 
 app.MapPost("/api/v1/order/cancel", async (CancelOrderHttpRequest req, TradingSessionService trading, HttpContext ctx) =>
 {
     var ip = ctx.Connection.RemoteIpAddress?.ToString();
-    var (ok, status, message) = await trading.CancelOrderAsync(req.OrderId, req.ApiKey, ip);
+    var (ok, status, message) = await trading.CancelOrderAsync(req.OrderId, req.MarketId, req.ApiKey, ip);
     return ok ? Results.Ok(new { status = status.ToString(), message })
               : Results.BadRequest(new { error = message });
 });
@@ -134,4 +148,4 @@ public sealed record PlaceOrderHttpRequest(
     bool PostOnly = false,
     string? ApiKey = "demo-key");
 
-public sealed record CancelOrderHttpRequest(long OrderId, string? ApiKey = "demo-key");
+public sealed record CancelOrderHttpRequest(long OrderId, int MarketId = 1, string? ApiKey = "demo-key");
