@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Dex.Domain.Orders;
 using Dex.MatchingEngine.OrderBook;
@@ -6,10 +7,8 @@ using Microsoft.Extensions.Logging;
 namespace Dex.MatchingEngine;
 
 /// <summary>
-/// Ultra-low-latency Matching Engine.
-/// Single market instance is processed by a dedicated consumer loop (single-writer principle).
-/// Commands arrive via a bounded Channel; results are published via another Channel.
-/// Designed for co-location and sub-millisecond p99 latency on the hot path.
+/// Ultra-low-latency Matching Engine for a single market.
+/// Single-writer processing loop; Place/Cancel return the actual MatchingResult.
 /// </summary>
 public sealed class MatchingEngine : IAsyncDisposable
 {
@@ -17,7 +16,8 @@ public sealed class MatchingEngine : IAsyncDisposable
     private readonly OrderBook.OrderBook _book;
     private readonly Channel<MatchingCommand> _inbound;
     private readonly Channel<MatchingResult> _outbound;
-    private readonly ILogger<MatchingEngine> _logger;
+    private readonly ConcurrentDictionary<long, TaskCompletionSource<MatchingResult>> _pending = new();
+    private readonly ILogger _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _processingLoop;
     private long _nextOrderId = 1;
@@ -26,21 +26,19 @@ public sealed class MatchingEngine : IAsyncDisposable
     public OrderBook.OrderBook Book => _book;
     public ChannelReader<MatchingResult> Results => _outbound.Reader;
 
-    public MatchingEngine(int marketId, ILogger<MatchingEngine> logger, int inboundCapacity = 65_536)
+    public MatchingEngine(int marketId, ILogger logger, int inboundCapacity = 65_536)
     {
         if (marketId <= 0) throw new ArgumentOutOfRangeException(nameof(marketId));
         _marketId = marketId;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _book = new OrderBook.OrderBook(marketId);
 
-        var options = new BoundedChannelOptions(inboundCapacity)
+        _inbound = Channel.CreateBounded<MatchingCommand>(new BoundedChannelOptions(inboundCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
-        };
-
-        _inbound = Channel.CreateBounded<MatchingCommand>(options);
+        });
         _outbound = Channel.CreateUnbounded<MatchingResult>(new UnboundedChannelOptions
         {
             SingleReader = false,
@@ -50,16 +48,60 @@ public sealed class MatchingEngine : IAsyncDisposable
         _processingLoop = Task.Run(ProcessLoopAsync);
     }
 
-    public ValueTask PlaceOrderAsync(Order order, CancellationToken ct = default)
+    public async Task<MatchingResult> PlaceOrderAsync(Order order, CancellationToken ct = default)
     {
-        var cmd = new MatchingCommand(MatchingCommandType.Place, order, null);
-        return _inbound.Writer.WriteAsync(cmd, ct);
+        if (order.MarketId != _marketId)
+            throw new ArgumentException($"Order market {order.MarketId} does not match engine {_marketId}.");
+
+        var tcs = new TaskCompletionSource<MatchingResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pending.TryAdd(order.OrderId, tcs))
+            throw new InvalidOperationException($"Duplicate pending order id {order.OrderId}");
+
+        try
+        {
+            await using var reg = ct.Register(() =>
+            {
+                if (_pending.TryRemove(order.OrderId, out var pending))
+                    pending.TrySetCanceled(ct);
+            });
+
+            await _inbound.Writer.WriteAsync(
+                new MatchingCommand(MatchingCommandType.Place, order, null), ct).ConfigureAwait(false);
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        catch
+        {
+            _pending.TryRemove(order.OrderId, out _);
+            throw;
+        }
     }
 
-    public ValueTask CancelOrderAsync(long orderId, CancellationToken ct = default)
+    public async Task<MatchingResult> CancelOrderAsync(long orderId, CancellationToken ct = default)
     {
-        var cmd = new MatchingCommand(MatchingCommandType.Cancel, null, orderId);
-        return _inbound.Writer.WriteAsync(cmd, ct);
+        var tcs = new TaskCompletionSource<MatchingResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var key = -orderId;
+        if (!_pending.TryAdd(key, tcs))
+            throw new InvalidOperationException($"Duplicate pending cancel for {orderId}");
+
+        try
+        {
+            await using var reg = ct.Register(() =>
+            {
+                if (_pending.TryRemove(key, out var pending))
+                    pending.TrySetCanceled(ct);
+            });
+
+            await _inbound.Writer.WriteAsync(
+                new MatchingCommand(MatchingCommandType.Cancel, null, orderId), ct).ConfigureAwait(false);
+
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        catch
+        {
+            _pending.TryRemove(key, out _);
+            throw;
+        }
     }
 
     private async Task ProcessLoopAsync()
@@ -85,17 +127,17 @@ public sealed class MatchingEngine : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Unhandled exception while processing command {Type} for market {MarketId}",
+                    _logger.LogError(ex, "Unhandled exception while processing {Type} market={MarketId}",
                         cmd.Type, _marketId);
                 }
             }
         }
-        catch (OperationCanceledException)
-        {
-            // graceful shutdown
-        }
+        catch (OperationCanceledException) { }
         finally
         {
+            foreach (var kv in _pending)
+                kv.Value.TrySetCanceled();
+            _pending.Clear();
             _outbound.Writer.TryComplete();
         }
     }
@@ -103,50 +145,44 @@ public sealed class MatchingEngine : IAsyncDisposable
     private void ProcessPlace(Order order)
     {
         if (order.OrderId <= 0)
-        {
-            // Engine assigns ID if not pre-assigned by gateway
-            var id = Interlocked.Increment(ref _nextOrderId);
-            // We cannot mutate the public OrderId easily; in production Order is created by the engine
-            // For this core we assume the caller already set a unique OrderId.
-        }
+            Interlocked.Increment(ref _nextOrderId);
 
-        IReadOnlyList<Trade> trades;
-
-        if (order.Type == OrderType.Market)
-        {
-            trades = _book.PlaceMarketOrder(order);
-        }
-        else
-        {
-            trades = _book.PlaceLimitOrder(order);
-        }
+        IReadOnlyList<Trade> trades = order.Type == OrderType.Market
+            ? _book.PlaceMarketOrder(order)
+            : _book.PlaceLimitOrder(order);
 
         var result = new MatchingResult(
             order.OrderId,
+            _marketId,
             order.Status,
             order.RemainingQuantity,
             trades,
             DateTime.UtcNow.Ticks);
 
-        if (!_outbound.Writer.TryWrite(result))
-        {
-            _logger.LogWarning("Outbound channel full while publishing result for order {OrderId}", order.OrderId);
-        }
+        CompletePending(order.OrderId, result);
+        _outbound.Writer.TryWrite(result);
     }
 
     private void ProcessCancel(long orderId)
     {
         var success = _book.CancelOrder(orderId);
         var status = success ? OrderStatus.Cancelled : OrderStatus.Rejected;
-
         var result = new MatchingResult(
             orderId,
+            _marketId,
             status,
             0m,
             Array.Empty<Trade>(),
             DateTime.UtcNow.Ticks);
 
+        CompletePending(-orderId, result);
         _outbound.Writer.TryWrite(result);
+    }
+
+    private void CompletePending(long key, MatchingResult result)
+    {
+        if (_pending.TryRemove(key, out var tcs))
+            tcs.TrySetResult(result);
     }
 
     public (IReadOnlyList<(decimal Price, decimal Quantity)> Bids,
@@ -157,10 +193,7 @@ public sealed class MatchingEngine : IAsyncDisposable
     {
         _cts.Cancel();
         _inbound.Writer.TryComplete();
-        try
-        {
-            await _processingLoop.ConfigureAwait(false);
-        }
+        try { await _processingLoop.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
         _cts.Dispose();
     }
@@ -189,6 +222,7 @@ public readonly struct MatchingCommand
 public readonly struct MatchingResult
 {
     public long OrderId { get; }
+    public int MarketId { get; }
     public OrderStatus Status { get; }
     public decimal RemainingQuantity { get; }
     public IReadOnlyList<Trade> Trades { get; }
@@ -196,12 +230,14 @@ public readonly struct MatchingResult
 
     public MatchingResult(
         long orderId,
+        int marketId,
         OrderStatus status,
         decimal remainingQuantity,
         IReadOnlyList<Trade> trades,
         long timestampTicks)
     {
         OrderId = orderId;
+        MarketId = marketId;
         Status = status;
         RemainingQuantity = remainingQuantity;
         Trades = trades;
