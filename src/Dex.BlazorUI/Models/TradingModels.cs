@@ -178,6 +178,9 @@ public static class MarketCatalog
     }
 
     public static MarketInfo? ById(int id) => All.FirstOrDefault(m => m.MarketId == id);
+
+    /// <summary>Alias for Get — used by Trade.razor route binding.</summary>
+    public static MarketInfo Find(string? symbol) => Get(string.IsNullOrWhiteSpace(symbol) ? "BTC-USDT" : symbol);
 }
 
 public sealed class OrderConfirmRequest
