@@ -6,6 +6,7 @@
 @using Dex.BlazorUI.Services
 @inject LiveMarketDataService Market
 @inject TradingPortfolioService Portfolio
+@inject OrderApiService OrderApi
 @inject NavigationManager Nav
 @implements IDisposable
 
@@ -92,20 +93,19 @@
     <span>STATUS <strong class="ok">@Market.StatusMessage</strong></span>
     <span>ORDERS <strong>@Portfolio.OpenOrders.Count</strong></span>
     <span>POSITIONS <strong>@Portfolio.Positions.Count</strong></span>
-    <span style="margin-left:auto">Total uPnL <strong class="@(_upnl >= 0 ? "ok" : "c-r")">@(_upnl >= 0 ? "+" : "")@_upnl.ToString("N2")</strong></span>
+    <span>EQUITY <strong>$ @_equity.ToString("N2")</strong></span>
 </div>
 
-@if (_toast is not null)
+@if (!string.IsNullOrEmpty(_toast))
 {
-    <div class="toast"><span class="dot"></span><span>@_toast</span></div>
+    <div class="toast-bar">@_toast</div>
 }
 
 @if (_confirm is not null)
 {
     <div class="modal-backdrop" @onclick="() => _confirm = null">
-        <div class="modal" @onclick:stopPropagation="true">
+        <div class="modal-card" @onclick:stopPropagation="true">
             <h2><span class="@(_confirm.Side == OrderSide.Buy ? "c-g" : "c-r")">@(_confirm.Side == OrderSide.Buy ? "↑" : "↓")</span> Confirm @(_confirm.Side == OrderSide.Buy ? "Long" : "Short") @_market.Symbol</h2>
-            <p class="hint">Review order details before execution.</p>
             <div class="modal-row"><span class="k">Size</span><span class="v">@_confirm.Qty.ToString("0.####") @_market.Base</span></div>
             <div class="modal-row"><span class="k">Type</span><span class="v">@_confirm.Type</span></div>
             <div class="modal-row"><span class="k">Price</span><span class="v">@(_confirm.Type == OrderType.Market ? "Market" : FmtDec(_confirm.Price, _market.PriceDecimals))</span></div>
@@ -128,49 +128,57 @@
 
     private MarketInfo _market = MarketCatalog.All[0];
     private string _search = "", _tf = "1m";
-    private string? _toast;
+    private decimal _last, _bid, _ask, _mid, _chg, _prefill;
+    private decimal? _tp, _sl, _entry;
     private TradeTick? _lastTrade;
-    private decimal? _prefill, _tp, _sl, _entry;
-    private OrderConfirmRequest? _confirm;
+    private string? _toast;
     private CancellationTokenSource? _toastCts;
+    private OrderConfirmRequest? _confirm;
 
-    private decimal _last => Market.Ticker?.LastPrice ?? Market.Book.Mid;
-    private decimal _bid => Market.Ticker?.BestBid ?? (Market.Book.Bids.FirstOrDefault()?.Price ?? 0);
-    private decimal _ask => Market.Ticker?.BestAsk ?? (Market.Book.Asks.FirstOrDefault()?.Price ?? 0);
-    private decimal _mid => Market.Book.Mid > 0 ? Market.Book.Mid : _last;
-    private decimal _chg => Market.Ticker?.PriceChangePercent24h ?? 0;
+    private IEnumerable<MarketInfo> Filtered =>
+        string.IsNullOrWhiteSpace(_search)
+            ? MarketCatalog.All
+            : MarketCatalog.All.Where(m => m.Symbol.Contains(_search, StringComparison.OrdinalIgnoreCase)
+                                       || m.Base.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
     private decimal _upnl => Portfolio.Positions.Sum(p => p.UnrealizedPnl);
     private decimal _available => Portfolio.AvailableMargin(_upnl);
     private decimal _equity => Portfolio.UsdtBalance + _upnl + Portfolio.Positions.Sum(p => p.Margin);
     private PositionRow? _pos => Portfolio.Positions.FirstOrDefault(p => p.Symbol == _market.Symbol);
 
-    private IEnumerable<MarketInfo> Filtered =>
-        string.IsNullOrWhiteSpace(_search) ? MarketCatalog.All
-        : MarketCatalog.All.Where(m => m.Symbol.Contains(_search, StringComparison.OrdinalIgnoreCase)
-                                    || m.Base.Contains(_search, StringComparison.OrdinalIgnoreCase));
-
     protected override async Task OnParametersSetAsync()
     {
-        _market = MarketCatalog.Get(string.IsNullOrWhiteSpace(Symbol) ? "BTC-USDT" : Symbol);
+        if (!string.IsNullOrEmpty(Symbol))
+        {
+            var m = MarketCatalog.Find(Symbol);
+            if (m is not null) _market = m;
+        }
+        await Market.StartAsync(_market);
         Market.UiRefreshRequested -= OnMd;
         Market.UiRefreshRequested += OnMd;
         Portfolio.Changed -= OnPf;
         Portfolio.Changed += OnPf;
-        await Market.StartAsync(_market);
+        SyncQuotes();
     }
 
-    private void OnMd()
-    {
-        if (Market.Trades.Count > 0) _lastTrade = Market.Trades[0];
-        if (_last > 0) Portfolio.OnPriceTick(_market.Symbol, _last, _bid, _ask);
-        if (_pos is not null) _entry = _pos.EntryPrice;
-        InvokeAsync(StateHasChanged);
-    }
+    private void OnMd() { SyncQuotes(); InvokeAsync(StateHasChanged); }
     private void OnPf() => InvokeAsync(StateHasChanged);
 
-    private void Go(string sym) => Nav.NavigateTo("/trade/" + sym);
-    private void OnLevels((decimal? Tp, decimal? Sl) l) { _tp = l.Tp; _sl = l.Sl; }
+    private void SyncQuotes()
+    {
+        _last = Market.Ticker?.LastPrice ?? Market.Book.Mid;
+        _bid = Market.Book.Bids.FirstOrDefault()?.Price ?? Market.Ticker?.BestBid ?? 0;
+        _ask = Market.Book.Asks.FirstOrDefault()?.Price ?? Market.Ticker?.BestAsk ?? 0;
+        _mid = Market.Book.Mid;
+        _chg = Market.Ticker?.PriceChangePercent24h ?? 0;
+        if (Market.Trades.Count > 0) _lastTrade = Market.Trades[0];
+        if (_last > 0) Portfolio.OnPriceTick(_market.Symbol, _last, _bid, _ask);
+        _entry = _pos?.EntryPrice;
+    }
 
+    private void Go(string sym) => Nav.NavigateTo("/trade/" + sym);
+
+    private void OnLevels((decimal? Tp, decimal? Sl) l) { _tp = l.Tp; _sl = l.Sl; }
     private void ShowConfirm(OrderConfirmRequest m) => _confirm = m;
 
     private async Task ExecuteConfirm()
@@ -178,10 +186,34 @@
         if (_confirm is null) return;
         var c = _confirm;
         _confirm = null;
+
+        // 1) Local portfolio (always — instant UI feedback on live prices)
         var (ok, msg, _) = Portfolio.PlaceOrder(
             _market, c.Side, c.Type, c.Price, c.Qty, c.Leverage, c.MarginMode, c.ReduceOnly,
             c.Tp, c.Sl, _bid, _ask, _last);
-        await ShowToast(ok ? $"{msg}: {c.Side} {c.Qty} {_market.Base}" : msg);
+
+        // 2) Best-effort forward to MatchingEngine via ApiGateway when online
+        try
+        {
+            var api = await OrderApi.PlaceOrderAsync(
+                accountId: 1,
+                clientOrderId: DateTime.UtcNow.Ticks,
+                marketId: _market.MarketId,
+                side: c.Side,
+                type: c.Type,
+                tif: TimeInForce.Gtc,
+                price: c.Price,
+                quantity: c.Qty,
+                reduceOnly: c.ReduceOnly,
+                postOnly: false,
+                apiKey: "demo-key");
+            if (api.Success && !api.Message.Contains("offline", StringComparison.OrdinalIgnoreCase)
+                && !api.Message.Contains("Demo", StringComparison.OrdinalIgnoreCase))
+                msg = "Matched: " + msg;
+        }
+        catch { /* API optional */ }
+
+        await ShowToast(ok ? msg + $": {c.Side} {c.Qty} {_market.Base}" : msg);
         StateHasChanged();
     }
 
