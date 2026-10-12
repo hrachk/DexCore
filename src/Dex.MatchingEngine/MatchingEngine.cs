@@ -23,6 +23,7 @@ public sealed class MatchingEngine : IAsyncDisposable
     private long _nextOrderId = 1;
 
     public int MarketId => _marketId;
+    public OrderBook.OrderBook Book => _book;
     public ChannelReader<MatchingResult> Results => _outbound.Reader;
 
     public MatchingEngine(int marketId, ILogger<MatchingEngine> logger, int inboundCapacity = 65_536)
