@@ -56,6 +56,20 @@ dotnet test tests/Dex.LoadTests -c Release --logger "console;verbosity=detailed"
 ### 5. Formal verification specs
 See `contracts/formal/INVARIANTS.md` and `*.spec` (Certora CVL / Halmos).
 
+### 6. Run ApiGateway + Blazor Terminal
+
+```bash
+# Terminal 1 — matching + risk + order API
+dotnet run --project src/Dex.ApiGateway
+# listens on http://localhost:5080
+
+# Terminal 2 — trading UI
+dotnet run --project src/Dex.BlazorUI
+# open http://localhost:5200
+```
+
+Blazor uses live Binance market data and dual-writes orders to local portfolio + ApiGateway when available.
+
 ---
 
 ## Project Layout
@@ -77,7 +91,8 @@ DexCore/
 │   ├── Dex.SettlementService
 │   ├── Dex.Contracts          # .proto (market_data, trading)
 │   ├── Dex.ApiGateway         # SignalR, rate limit, HMAC, trading session
-│   └── Dex.ComplianceService  # AML, ZK adapter, rule engine
+│   ├── Dex.ComplianceService  # AML, ZK adapter, rule engine
+│   └── Dex.BlazorUI           # Trading terminal (WASM)
 └── tests/
     ├── Dex.*.Tests            # Unit tests per module
     ├── Dex.IntegrationTests   # E2E lifecycle
